@@ -16,7 +16,8 @@ Tampermonkey user script that adds a draggable **Export JSON** button to Google 
 
 ## Installation
 1. Install [Tampermonkey](https://www.tampermonkey.net/) (or another compatible userscript manager) in your browser.
-2. Open the raw version of [`script.js`](./script.js) in the repository.
+2. [Click This To Install](https://greasyfork.org/zh-CN/scripts/557864-ai-studio-chat-exporter-markdown-code-block-support)
+ Or Also Can Open the raw version of [`script.js`](./script.js) in the repository.
 3. Click **Install** (Tampermonkey) or **Confirm** to add the script.
 4. Ensure the script is enabled for `https://aistudio.google.com/prompts/*`.
 
