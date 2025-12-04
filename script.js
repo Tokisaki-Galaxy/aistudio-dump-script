@@ -2,9 +2,9 @@
 // @name         AI Studio Chat Exporter (Markdown & Code Block Support)
 // @namespace    http://tampermonkey.net/
 // @version      5.0
-// @description  导出 AI Studio 聊天记录。1. 按钮默认居中并可拖拽防遮挡。2. 智能识别 System Prompt。3. 完美 Markdown 格式还原。
 // @author       Tokisaki Galaxy
 // @match        https://aistudio.google.com/prompts/*
+// @description  Export AI Studio chat history. 1. i18n support (CN/EN/DE/RU). 2. Draggable button. 3. Auto system prompt detection. 4. Perfect Markdown formatting.
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
 // ==/UserScript==
@@ -12,80 +12,119 @@
 (function() {
     'use strict';
 
-    // --- 配置区域 ---
+    // --- 🌍 i18n Configuration ---
+    const MESSAGES = {
+        'zh': {
+            exportBtn: "导出 JSON",
+            wait: "请稍候...",
+            getSys: "获取系统提示词...",
+            resetView: "重置视图...",
+            analyzing: "分析抓取中...",
+            packaging: "生成 JSON...",
+            noChat: "未找到聊天区域，请确保处于对话页面。",
+            sysFound: "已获取系统提示词",
+            sysHidden: "展开侧边栏获取..."
+        },
+        'en': {
+            exportBtn: "Export JSON",
+            wait: "Please wait...",
+            getSys: "Fetching System Prompt...",
+            resetView: "Resetting View...",
+            analyzing: "Analyzing...",
+            packaging: "Generating JSON...",
+            noChat: "Chat container not found.",
+            sysFound: "System prompt captured",
+            sysHidden: "Expanding sidebar..."
+        },
+        'de': {
+            exportBtn: "JSON Exportieren",
+            wait: "Bitte warten...",
+            getSys: "System-Prompt abrufen...",
+            resetView: "Ansicht zurücksetzen...",
+            analyzing: "Analysieren...",
+            packaging: "JSON erstellen...",
+            noChat: "Chat-Bereich nicht gefunden.",
+            sysFound: "System-Prompt erfasst",
+            sysHidden: "Seitenleiste erweitern..."
+        },
+        'ru': {
+            exportBtn: "Экспорт JSON",
+            wait: "Подождите...",
+            getSys: "Получение System Prompt...",
+            resetView: "Сброс вида...",
+            analyzing: "Анализ...",
+            packaging: "Создание JSON...",
+            noChat: "Область чата не найдена.",
+            sysFound: "System prompt получен",
+            sysHidden: "Расширение боковой панели..."
+        }
+    };
+
+    // Detect Browser Language
+    const langCode = (navigator.language || navigator.userLanguage).slice(0, 2);
+    const t = (key) => MESSAGES[langCode]?.[key] || MESSAGES['en'][key];
+
+    // --- Config ---
     const CONFIG = {
-        scrollStep: 350,       // 滚动步长，推荐 300-400
-        scrollDelay: 1200,     // 滚动后等待渲染时间(ms)
-        uiDelay: 1000,         // 侧边栏动画等待时间
+        scrollStep: 350,
+        scrollDelay: 1200,
+        uiDelay: 1000,
     };
 
     let isExporting = false;
 
-    // --- UI: 可拖拽悬浮按钮 ---
+    // --- UI: Draggable Button ---
     function createExportButton() {
         if (document.getElementById('ai-studio-export-btn')) return;
 
         const btn = document.createElement('button');
         btn.id = 'ai-studio-export-btn';
-        btn.innerText = '导出 JSON';
+        btn.innerText = t('exportBtn');
         
-        // 初始样式：水平居中，垂直靠上
         Object.assign(btn.style, {
             position: 'fixed',
             top: '20px',
             left: '50%',
-            transform: 'translateX(-50%)', // CSS 居中黑魔法
+            transform: 'translateX(-50%)',
             zIndex: '99999',
             padding: '10px 16px',
             backgroundColor: '#1a73e8',
             color: 'white',
             border: 'none',
-            borderRadius: '20px', // 圆角更好看
-            cursor: 'move',       // 提示可移动
+            borderRadius: '20px',
+            cursor: 'move',
             boxShadow: '0 4px 8px rgba(0,0,0,0.3)',
             fontWeight: 'bold',
             fontSize: '14px',
             fontFamily: 'sans-serif',
-            transition: 'background-color 0.2s, transform 0.1s', // 拖拽时取消 transform 动画防止卡顿
-            userSelect: 'none'    // 防止拖拽时选中文本
+            transition: 'background-color 0.2s, transform 0.1s',
+            userSelect: 'none'
         });
 
-        // --- 拖拽核心逻辑 ---
+        // Draggable Logic
         let isDragging = false;
-        let hasMoved = false; // 用于区分点击和拖拽
+        let hasMoved = false;
         let startX, startY;
-        let initialLeft, initialTop;
 
         btn.addEventListener('mousedown', function(e) {
             isDragging = true;
             hasMoved = false;
-            
-            // 获取当前按钮相对于视口的坐标
             const rect = btn.getBoundingClientRect();
-            
-            // 计算鼠标相对于按钮左上角的偏移
             startX = e.clientX - rect.left;
             startY = e.clientY - rect.top;
 
-            // 关键：一旦开始拖拽，移除 CSS 的 transform 居中属性，转为绝对坐标控制
             btn.style.transform = 'none';
             btn.style.left = rect.left + 'px';
             btn.style.top = rect.top + 'px';
-            btn.style.opacity = '0.9'; // 拖拽时稍微变透明
+            btn.style.opacity = '0.9';
         });
 
         document.addEventListener('mousemove', function(e) {
             if (!isDragging) return;
-            
             hasMoved = true;
             e.preventDefault();
-
-            // 计算新位置
-            const x = e.clientX - startX;
-            const y = e.clientY - startY;
-
-            btn.style.left = `${x}px`;
-            btn.style.top = `${y}px`;
+            btn.style.left = `${e.clientX - startX}px`;
+            btn.style.top = `${e.clientY - startY}px`;
         });
 
         document.addEventListener('mouseup', function() {
@@ -95,7 +134,6 @@
             }
         });
 
-        // 点击事件：如果是拖拽结束，则不触发导出
         btn.addEventListener('click', function(e) {
             if (hasMoved) {
                 e.preventDefault();
@@ -120,14 +158,16 @@
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // --- 逻辑 1: System Instruction ---
+    // --- Logic 1: System Instruction ---
     async function getSystemInstruction() {
-        updateBtn('获取System Prompt...');
+        updateBtn(t('getSys'));
+        
         let target = document.querySelector('ms-system-instructions-panel .subtitle');
         if (target && target.innerText.trim()) return target.innerText.trim();
 
         const toggleBtn = document.querySelector('.runsettings-toggle-button');
         if (toggleBtn) {
+            console.log(t('sysHidden'));
             toggleBtn.click();
             await sleep(CONFIG.uiDelay);
             
@@ -145,16 +185,15 @@
         return "";
     }
 
-    // --- 逻辑 2: HTML -> Markdown 转换器 ---
+    // --- Logic 2: Markdown Converter ---
     function domToMarkdown(node) {
         if (!node) return "";
         
-        // 垃圾清理
         const skipClasses = ['author-label', 'actions-container', 'turn-footer', 'thinking-progress-icon', 'thought-collapsed-text', 'mat-icon'];
         if (node.classList && skipClasses.some(c => node.classList.contains(c))) return "";
         if (node.tagName === 'MS-THOUGHT-CHUNK' || node.tagName === 'BUTTON') return "";
 
-        // 代码块
+        // Code Blocks
         if (node.tagName === 'MS-CODE-BLOCK') {
             let lang = "text";
             const titleSpan = node.querySelector('.title span:last-child');
@@ -165,25 +204,24 @@
             return `\n\`\`\`${lang}\n${codeText.trim()}\n\`\`\`\n`;
         }
 
-        // 列表
+        // List
         if (node.tagName === 'LI') return `- ${parseChildren(node).trim()}\n`;
 
-        // 标题
+        // Heading
         if (/^H[1-6]$/.test(node.tagName)) {
             const level = parseInt(node.tagName[1]);
             return `\n${'#'.repeat(level)} ${parseChildren(node).trim()}\n`;
         }
 
-        // 段落与换行
+        // Paragraph & LineBreak
         if (node.tagName === 'P') return `\n${parseChildren(node).trim()}\n\n`;
         if (node.tagName === 'BR') return "\n";
 
-        // 文本节点
         if (node.nodeType === Node.TEXT_NODE) return node.textContent;
         
         let result = parseChildren(node);
 
-        // 格式化
+        // Formatting
         if (['STRONG', 'B'].includes(node.tagName)) result = `**${result}**`;
         if (['EM', 'I'].includes(node.tagName)) result = `*${result}*`;
         if (node.classList && node.classList.contains('inline-code')) result = `\`${result}\``;
@@ -208,24 +246,26 @@
         return md;
     }
 
-    // --- 逻辑 3: 滚动抓取 ---
+    // --- Logic 3: Main Flow ---
     async function startExportProcess() {
         if (isExporting) return;
         isExporting = true;
 
         const container = document.querySelector('ms-autoscroll-container');
         if (!container) {
-            alert('未找到聊天区域。');
+            alert(t('noChat'));
             isExporting = false;
             return;
         }
 
+        // 1. System Prompt
         const sysInstruction = await getSystemInstruction();
 
+        // 2. Scroll & Scrape
         const messageMap = new Map();
         const idOrder = [];
 
-        updateBtn('重置视图...');
+        updateBtn(t('resetView'));
         container.scrollTo({ top: 0, behavior: 'instant' });
         await sleep(1500);
 
@@ -251,12 +291,13 @@
                 }
             });
 
+            // Stop condition
             const isBottom = Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) < 20;
             if (Math.abs(container.scrollTop - lastScrollTop) < 2) stuckCounter++;
             else stuckCounter = 0;
 
             const percent = Math.min(99, Math.floor((container.scrollTop / (container.scrollHeight - container.clientHeight)) * 100));
-            updateBtn(`进度: ${percent}%`);
+            updateBtn(`${t('analyzing')} ${percent}%`);
 
             if (isBottom || stuckCounter >= 3) break;
 
@@ -265,7 +306,8 @@
             await sleep(CONFIG.scrollDelay);
         }
 
-        updateBtn('生成中...');
+        // 3. Export
+        updateBtn(t('packaging'));
         const validMessages = [];
         idOrder.forEach(id => {
             if (messageMap.has(id)) {
@@ -278,7 +320,7 @@
             messages: validMessages
         });
 
-        updateBtn('导出 JSON', false);
+        updateBtn(t('exportBtn'), false);
         isExporting = false;
     }
 
