@@ -65,4 +65,4 @@ Fallback defaults to English when the active locale is not listed.
 Pull requests are welcome. Please keep the userscript self-contained and adopt concise comments only when logic is non-obvious. For translation updates, extend the `MESSAGES` map in `script.js` and mention the new locale in this README.
 
 ## License
-[MIT](./LICENSE)
+[AGPL-3.0](./LICENSE)

@@ -7,6 +7,7 @@
 // @description  Export AI Studio chat history. 1. i18n support (CN/EN/DE/RU/JA). 2. Draggable button. 3. Auto system prompt detection. 4. Perfect Markdown formatting.
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
+// @license      AGPL-3.0
 // ==/UserScript==
 
 (function() {
