@@ -2,9 +2,9 @@
 // @name         AI Studio Chat Exporter (Markdown & Code Block Support)
 // @namespace    http://tampermonkey.net/
 // @version      5.0
-// @description  导出 AI Studio 聊天记录。1. 自动提取 System Prompt。2. 自动滚动抓取完整对话。3. 深度解析 HTML，完美还原 Markdown 格式（代码块、列表、换行）。
+// @description  导出 AI Studio 聊天记录。1. 按钮默认居中并可拖拽防遮挡。2. 智能识别 System Prompt。3. 完美 Markdown 格式还原。
 // @author       Tokisaki Galaxy
-// @match        https://aistudio.google.com/*
+// @match        https://aistudio.google.com/prompts/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
 // ==/UserScript==
@@ -21,20 +21,90 @@
 
     let isExporting = false;
 
-    // --- UI: 悬浮按钮 ---
+    // --- UI: 可拖拽悬浮按钮 ---
     function createExportButton() {
         if (document.getElementById('ai-studio-export-btn')) return;
+
         const btn = document.createElement('button');
         btn.id = 'ai-studio-export-btn';
         btn.innerText = '导出 JSON';
+        
+        // 初始样式：水平居中，垂直靠上
         Object.assign(btn.style, {
-            position: 'fixed', top: '10px', right: '100px', zIndex: '9999',
-            padding: '8px 12px', backgroundColor: '#1a73e8', color: 'white',
-            border: 'none', borderRadius: '4px', cursor: 'pointer',
-            boxShadow: '0 2px 5px rgba(0,0,0,0.2)', fontWeight: 'bold',
-            fontSize: '14px', fontFamily: 'sans-serif', transition: 'all 0.3s'
+            position: 'fixed',
+            top: '20px',
+            left: '50%',
+            transform: 'translateX(-50%)', // CSS 居中黑魔法
+            zIndex: '99999',
+            padding: '10px 16px',
+            backgroundColor: '#1a73e8',
+            color: 'white',
+            border: 'none',
+            borderRadius: '20px', // 圆角更好看
+            cursor: 'move',       // 提示可移动
+            boxShadow: '0 4px 8px rgba(0,0,0,0.3)',
+            fontWeight: 'bold',
+            fontSize: '14px',
+            fontFamily: 'sans-serif',
+            transition: 'background-color 0.2s, transform 0.1s', // 拖拽时取消 transform 动画防止卡顿
+            userSelect: 'none'    // 防止拖拽时选中文本
         });
-        btn.onclick = startExportProcess;
+
+        // --- 拖拽核心逻辑 ---
+        let isDragging = false;
+        let hasMoved = false; // 用于区分点击和拖拽
+        let startX, startY;
+        let initialLeft, initialTop;
+
+        btn.addEventListener('mousedown', function(e) {
+            isDragging = true;
+            hasMoved = false;
+            
+            // 获取当前按钮相对于视口的坐标
+            const rect = btn.getBoundingClientRect();
+            
+            // 计算鼠标相对于按钮左上角的偏移
+            startX = e.clientX - rect.left;
+            startY = e.clientY - rect.top;
+
+            // 关键：一旦开始拖拽，移除 CSS 的 transform 居中属性，转为绝对坐标控制
+            btn.style.transform = 'none';
+            btn.style.left = rect.left + 'px';
+            btn.style.top = rect.top + 'px';
+            btn.style.opacity = '0.9'; // 拖拽时稍微变透明
+        });
+
+        document.addEventListener('mousemove', function(e) {
+            if (!isDragging) return;
+            
+            hasMoved = true;
+            e.preventDefault();
+
+            // 计算新位置
+            const x = e.clientX - startX;
+            const y = e.clientY - startY;
+
+            btn.style.left = `${x}px`;
+            btn.style.top = `${y}px`;
+        });
+
+        document.addEventListener('mouseup', function() {
+            if (isDragging) {
+                isDragging = false;
+                btn.style.opacity = '1';
+            }
+        });
+
+        // 点击事件：如果是拖拽结束，则不触发导出
+        btn.addEventListener('click', function(e) {
+            if (hasMoved) {
+                e.preventDefault();
+                e.stopPropagation();
+                return;
+            }
+            startExportProcess();
+        });
+
         document.body.appendChild(btn);
     }
 
@@ -44,35 +114,30 @@
             btn.innerText = text;
             btn.disabled = disabled;
             btn.style.backgroundColor = disabled ? '#7f8c8d' : '#1a73e8';
-            btn.style.cursor = disabled ? 'wait' : 'pointer';
+            btn.style.cursor = disabled ? 'wait' : 'move';
         }
     }
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // --- 逻辑 1: System Instruction 抓取 ---
+    // --- 逻辑 1: System Instruction ---
     async function getSystemInstruction() {
         updateBtn('获取System Prompt...');
-        // 1. 尝试直接获取
         let target = document.querySelector('ms-system-instructions-panel .subtitle');
         if (target && target.innerText.trim()) return target.innerText.trim();
 
-        // 2. 尝试打开侧边栏获取
         const toggleBtn = document.querySelector('.runsettings-toggle-button');
         if (toggleBtn) {
-            console.log("Expanding sidebar...");
             toggleBtn.click();
             await sleep(CONFIG.uiDelay);
-
+            
             target = document.querySelector('ms-system-instructions-panel .subtitle');
             let text = target ? target.innerText.trim() : "";
             if(!text) {
-                // 备用：查找输入框
                 const fallback = document.querySelector('ms-system-instruction-editor textarea');
                 if(fallback) text = fallback.value;
             }
 
-            // 恢复现场
             toggleBtn.click();
             await sleep(500);
             return text;
@@ -80,61 +145,47 @@
         return "";
     }
 
-    // --- 逻辑 2: 高级格式化 (HTML -> Markdown) ---
+    // --- 逻辑 2: HTML -> Markdown 转换器 ---
     function domToMarkdown(node) {
         if (!node) return "";
-        let result = "";
-
-        // 垃圾清理 (不进入递归)
+        
+        // 垃圾清理
         const skipClasses = ['author-label', 'actions-container', 'turn-footer', 'thinking-progress-icon', 'thought-collapsed-text', 'mat-icon'];
         if (node.classList && skipClasses.some(c => node.classList.contains(c))) return "";
         if (node.tagName === 'MS-THOUGHT-CHUNK' || node.tagName === 'BUTTON') return "";
 
-        // --- 特殊处理: 代码块 ---
+        // 代码块
         if (node.tagName === 'MS-CODE-BLOCK') {
-            // 尝试获取语言
-            let lang = "";
-            const titleSpan = node.querySelector('.title span:last-child'); // 通常在这里
+            let lang = "text";
+            const titleSpan = node.querySelector('.title span:last-child');
             if (titleSpan) lang = titleSpan.innerText.trim();
-            if (!lang) lang = "text"; // 默认
-
-            // 获取代码内容，优先取 code 标签，保留格式
+            
             const codeEl = node.querySelector('code');
-            const codeText = codeEl ? codeEl.innerText : node.innerText; // innerText 保留换行
-
+            const codeText = codeEl ? codeEl.innerText : node.innerText;
             return `\n\`\`\`${lang}\n${codeText.trim()}\n\`\`\`\n`;
         }
 
-        // --- 特殊处理: 列表 ---
-        if (node.tagName === 'LI') {
-            // 简单处理无序列表，暂不处理嵌套索引
-            return `- ${parseChildren(node).trim()}\n`;
-        }
+        // 列表
+        if (node.tagName === 'LI') return `- ${parseChildren(node).trim()}\n`;
 
-        // --- 特殊处理: 标题 ---
+        // 标题
         if (/^H[1-6]$/.test(node.tagName)) {
             const level = parseInt(node.tagName[1]);
             return `\n${'#'.repeat(level)} ${parseChildren(node).trim()}\n`;
         }
 
-        // --- 特殊处理: 段落与换行 ---
-        if (node.tagName === 'P') {
-            return `\n${parseChildren(node).trim()}\n\n`; // 段落前后加空行
-        }
+        // 段落与换行
+        if (node.tagName === 'P') return `\n${parseChildren(node).trim()}\n\n`;
         if (node.tagName === 'BR') return "\n";
 
-        // --- 递归处理子节点 ---
-        if (node.nodeType === Node.TEXT_NODE) {
-            return node.textContent; // 纯文本不 trim，保留行内空格
-        }
+        // 文本节点
+        if (node.nodeType === Node.TEXT_NODE) return node.textContent;
+        
+        let result = parseChildren(node);
 
-        // 默认遍历子节点
-        result = parseChildren(node);
-
-        // --- 行内样式 ---
-        if (node.tagName === 'STRONG' || node.tagName === 'B') result = `**${result}**`;
-        if (node.tagName === 'EM' || node.tagName === 'I') result = `*${result}*`;
-        // AI Studio 的 inline code 通常是 span class="inline-code"
+        // 格式化
+        if (['STRONG', 'B'].includes(node.tagName)) result = `**${result}**`;
+        if (['EM', 'I'].includes(node.tagName)) result = `*${result}*`;
         if (node.classList && node.classList.contains('inline-code')) result = `\`${result}\``;
 
         return result;
@@ -148,23 +199,16 @@
         return text;
     }
 
-    // 入口函数：提取纯净 Markdown
     function extractCleanMarkdown(turnElement) {
         const contentDiv = turnElement.querySelector('.turn-content');
         if (!contentDiv) return null;
-
-        // 我们不克隆了，直接只读遍历，性能更好
-        // 直接调用解析器
         let md = domToMarkdown(contentDiv);
-
-        // 后处理：去除过多的空行
         md = md.replace(/\n{3,}/g, '\n\n').trim();
-
         if (!md || md === "Model" || md === "User") return null;
         return md;
     }
 
-    // --- 逻辑 3: 滚动与导出主流程 ---
+    // --- 逻辑 3: 滚动抓取 ---
     async function startExportProcess() {
         if (isExporting) return;
         isExporting = true;
@@ -176,10 +220,8 @@
             return;
         }
 
-        // 1. 获取 System Prompt
         const sysInstruction = await getSystemInstruction();
 
-        // 2. 滚动抓取
         const messageMap = new Map();
         const idOrder = [];
 
@@ -203,20 +245,18 @@
                     role = 'assistant';
                 }
 
-                // 使用新的 Markdown 提取器
                 const content = extractCleanMarkdown(turn);
                 if (content) {
                     messageMap.set(uid, { role, content });
                 }
             });
 
-            // 滚动逻辑
             const isBottom = Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) < 20;
             if (Math.abs(container.scrollTop - lastScrollTop) < 2) stuckCounter++;
             else stuckCounter = 0;
 
             const percent = Math.min(99, Math.floor((container.scrollTop / (container.scrollHeight - container.clientHeight)) * 100));
-            updateBtn(`分析中... ${percent}%`);
+            updateBtn(`进度: ${percent}%`);
 
             if (isBottom || stuckCounter >= 3) break;
 
@@ -225,8 +265,7 @@
             await sleep(CONFIG.scrollDelay);
         }
 
-        // 3. 导出
-        updateBtn('封装JSON...');
+        updateBtn('生成中...');
         const validMessages = [];
         idOrder.forEach(id => {
             if (messageMap.has(id)) {
@@ -234,12 +273,11 @@
             }
         });
 
-        const exportData = {
+        downloadFile({
             system_instruction: sysInstruction,
             messages: validMessages
-        };
+        });
 
-        downloadFile(exportData);
         updateBtn('导出 JSON', false);
         isExporting = false;
     }
