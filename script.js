@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Studio Chat Exporter (Auto-Scroll & JSON)
+// @name         AI Studio Chat Exporter (Markdown & Code Block Support)
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  从 aistudio.google.com 提取完整聊天记录，支持自动滚动加载虚拟列表，精准清洗 "Model" 杂项与思考过程。
+// @version      5.0
+// @description  导出 AI Studio 聊天记录。1. 自动提取 System Prompt。2. 自动滚动抓取完整对话。3. 深度解析 HTML，完美还原 Markdown 格式（代码块、列表、换行）。
 // @author       Tokisaki Galaxy
 // @match        https://aistudio.google.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
@@ -12,247 +12,263 @@
 (function() {
     'use strict';
 
-    // 配置参数
+    // --- 配置区域 ---
     const CONFIG = {
-        scrollDelay: 1200, // 滚动后的等待时间(ms)，网速慢可适当调大
-        scrollStepPercent: 0.8, // 每次滚动屏幕高度的比例
+        scrollStep: 350,       // 滚动步长，推荐 300-400
+        scrollDelay: 1200,     // 滚动后等待渲染时间(ms)
+        uiDelay: 1000,         // 侧边栏动画等待时间
     };
 
     let isExporting = false;
 
-    // 创建悬浮按钮
+    // --- UI: 悬浮按钮 ---
     function createExportButton() {
         if (document.getElementById('ai-studio-export-btn')) return;
-
         const btn = document.createElement('button');
         btn.id = 'ai-studio-export-btn';
         btn.innerText = '导出 JSON';
         Object.assign(btn.style, {
-            position: 'fixed',
-            top: '10px',
-            right: '100px',
-            zIndex: '9999',
-            padding: '8px 12px',
-            backgroundColor: '#1a73e8',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer',
-            boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
-            fontWeight: 'bold',
-            fontSize: '14px',
-            transition: 'background-color 0.3s'
+            position: 'fixed', top: '10px', right: '100px', zIndex: '9999',
+            padding: '8px 12px', backgroundColor: '#1a73e8', color: 'white',
+            border: 'none', borderRadius: '4px', cursor: 'pointer',
+            boxShadow: '0 2px 5px rgba(0,0,0,0.2)', fontWeight: 'bold',
+            fontSize: '14px', fontFamily: 'sans-serif', transition: 'all 0.3s'
         });
-
-        btn.onmouseover = () => btn.style.backgroundColor = '#1558b0';
-        btn.onmouseout = () => btn.style.backgroundColor = isExporting ? '#999' : '#1a73e8';
-
         btn.onclick = startExportProcess;
         document.body.appendChild(btn);
     }
 
-    // 更新按钮状态
-    function updateButtonState(text, disabled = false) {
+    function updateBtn(text, disabled = false) {
         const btn = document.getElementById('ai-studio-export-btn');
         if (btn) {
             btn.innerText = text;
             btn.disabled = disabled;
-            btn.style.backgroundColor = disabled ? '#999' : '#1a73e8';
+            btn.style.backgroundColor = disabled ? '#7f8c8d' : '#1a73e8';
             btn.style.cursor = disabled ? 'wait' : 'pointer';
         }
     }
 
-    // 等待函数
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    // 获取 System Instruction
-    function getSystemInstruction() {
-        const sysElement = document.querySelector('ms-system-instruction-editor textarea') ||
-                           document.querySelector('[aria-label="System Instructions"]');
-        return sysElement ? (sysElement.value || sysElement.innerText).trim() : "";
+    // --- 逻辑 1: System Instruction 抓取 ---
+    async function getSystemInstruction() {
+        updateBtn('获取System Prompt...');
+        // 1. 尝试直接获取
+        let target = document.querySelector('ms-system-instructions-panel .subtitle');
+        if (target && target.innerText.trim()) return target.innerText.trim();
+
+        // 2. 尝试打开侧边栏获取
+        const toggleBtn = document.querySelector('.runsettings-toggle-button');
+        if (toggleBtn) {
+            console.log("Expanding sidebar...");
+            toggleBtn.click();
+            await sleep(CONFIG.uiDelay);
+
+            target = document.querySelector('ms-system-instructions-panel .subtitle');
+            let text = target ? target.innerText.trim() : "";
+            if(!text) {
+                // 备用：查找输入框
+                const fallback = document.querySelector('ms-system-instruction-editor textarea');
+                if(fallback) text = fallback.value;
+            }
+
+            // 恢复现场
+            toggleBtn.click();
+            await sleep(500);
+            return text;
+        }
+        return "";
     }
 
-    // 核心：清洗单个对话节点的 HTML 内容
-    function extractCleanText(turnElement) {
-        // 1. 找到内容容器，通常在 .turn-content 下
-        const contentDiv = turnElement.querySelector('.turn-content');
-        if (!contentDiv) return null;
+    // --- 逻辑 2: 高级格式化 (HTML -> Markdown) ---
+    function domToMarkdown(node) {
+        if (!node) return "";
+        let result = "";
 
-        // 克隆节点操作，避免影响页面
-        const clone = contentDiv.cloneNode(true);
+        // 垃圾清理 (不进入递归)
+        const skipClasses = ['author-label', 'actions-container', 'turn-footer', 'thinking-progress-icon', 'thought-collapsed-text', 'mat-icon'];
+        if (node.classList && skipClasses.some(c => node.classList.contains(c))) return "";
+        if (node.tagName === 'MS-THOUGHT-CHUNK' || node.tagName === 'BUTTON') return "";
 
-        // --- 移除列表 ---
+        // --- 特殊处理: 代码块 ---
+        if (node.tagName === 'MS-CODE-BLOCK') {
+            // 尝试获取语言
+            let lang = "";
+            const titleSpan = node.querySelector('.title span:last-child'); // 通常在这里
+            if (titleSpan) lang = titleSpan.innerText.trim();
+            if (!lang) lang = "text"; // 默认
 
-        // 2. 移除 "Model" / "User" 这样的头部标签 (修复只显示 "Model" 的问题)
-        clone.querySelectorAll('.author-label').forEach(el => el.remove());
+            // 获取代码内容，优先取 code 标签，保留格式
+            const codeEl = node.querySelector('code');
+            const codeText = codeEl ? codeEl.innerText : node.innerText; // innerText 保留换行
 
-        // 3. 移除思考过程 (ms-thought-chunk)
-        clone.querySelectorAll('ms-thought-chunk').forEach(el => el.remove());
+            return `\n\`\`\`${lang}\n${codeText.trim()}\n\`\`\`\n`;
+        }
 
-        // 4. 移除操作栏 (编辑、重试、复制等按钮)
-        clone.querySelectorAll('.actions-container').forEach(el => el.remove());
-        clone.querySelectorAll('button').forEach(el => el.remove());
+        // --- 特殊处理: 列表 ---
+        if (node.tagName === 'LI') {
+            // 简单处理无序列表，暂不处理嵌套索引
+            return `- ${parseChildren(node).trim()}\n`;
+        }
 
-        // 5. 移除展开思考的提示文案
-        clone.querySelectorAll('.thought-collapsed-text, .thought-panel-footer').forEach(el => el.remove());
+        // --- 特殊处理: 标题 ---
+        if (/^H[1-6]$/.test(node.tagName)) {
+            const level = parseInt(node.tagName[1]);
+            return `\n${'#'.repeat(level)} ${parseChildren(node).trim()}\n`;
+        }
 
-        // 获取纯文本
-        let text = clone.innerText.trim();
+        // --- 特殊处理: 段落与换行 ---
+        if (node.tagName === 'P') {
+            return `\n${parseChildren(node).trim()}\n\n`; // 段落前后加空行
+        }
+        if (node.tagName === 'BR') return "\n";
 
-        // 简单校验：如果清洗后只剩空字符，或者是加载占位符，视为无效
-        if (!text) return null;
+        // --- 递归处理子节点 ---
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.textContent; // 纯文本不 trim，保留行内空格
+        }
 
+        // 默认遍历子节点
+        result = parseChildren(node);
+
+        // --- 行内样式 ---
+        if (node.tagName === 'STRONG' || node.tagName === 'B') result = `**${result}**`;
+        if (node.tagName === 'EM' || node.tagName === 'I') result = `*${result}*`;
+        // AI Studio 的 inline code 通常是 span class="inline-code"
+        if (node.classList && node.classList.contains('inline-code')) result = `\`${result}\``;
+
+        return result;
+    }
+
+    function parseChildren(node) {
+        let text = "";
+        node.childNodes.forEach(child => {
+            text += domToMarkdown(child);
+        });
         return text;
     }
 
-    // 自动滚动并抓取逻辑
+    // 入口函数：提取纯净 Markdown
+    function extractCleanMarkdown(turnElement) {
+        const contentDiv = turnElement.querySelector('.turn-content');
+        if (!contentDiv) return null;
+
+        // 我们不克隆了，直接只读遍历，性能更好
+        // 直接调用解析器
+        let md = domToMarkdown(contentDiv);
+
+        // 后处理：去除过多的空行
+        md = md.replace(/\n{3,}/g, '\n\n').trim();
+
+        if (!md || md === "Model" || md === "User") return null;
+        return md;
+    }
+
+    // --- 逻辑 3: 滚动与导出主流程 ---
     async function startExportProcess() {
         if (isExporting) return;
         isExporting = true;
 
         const container = document.querySelector('ms-autoscroll-container');
         if (!container) {
-            alert('未找到聊天滚动区域，请确认当前在对话页面。');
+            alert('未找到聊天区域。');
             isExporting = false;
             return;
         }
 
-        // 存储所有对话，使用 ID 作为 Key 进行去重
-        // Map 会按照插入顺序保持，但由于我们可能有乱序插入，最后需按 DOM 顺序整理
-        const collectedMessages = new Map();
+        // 1. 获取 System Prompt
+        const sysInstruction = await getSystemInstruction();
 
-        updateButtonState('准备开始...');
+        // 2. 滚动抓取
+        const messageMap = new Map();
+        const idOrder = [];
 
-        // 1. 记录当前滚动位置以便恢复（可选，但通常我们最后会刷新）
-        const initialScrollTop = container.scrollTop;
+        updateBtn('重置视图...');
+        container.scrollTo({ top: 0, behavior: 'instant' });
+        await sleep(1500);
 
-        // 2. 滚动到最顶部，开始遍历
-        container.scrollTop = 0;
-        await sleep(1000);
+        let lastScrollTop = -1;
+        let stuckCounter = 0;
 
-        let previousScrollTop = -1;
-        let noProgressCount = 0;
-
-        // 循环滚动直到到底
         while (true) {
-            // 抓取当前视口可见的对话
-            const turns = document.querySelectorAll('ms-chat-turn');
-            let newItemsCount = 0;
+            const visibleTurns = document.querySelectorAll('ms-chat-turn');
+            visibleTurns.forEach(turn => {
+                const uid = turn.id;
+                if (!uid) return;
 
-            turns.forEach(turn => {
-                const turnId = turn.id; // 必须有 ID，例如 turn-xxxx
-                if (!turnId) return;
+                if (!idOrder.includes(uid)) idOrder.push(uid);
 
-                // 判断角色
                 let role = 'user';
-                // 检查是否为模型 (类名或属性判断)
                 if (turn.querySelector('.model-prompt-container') || turn.getAttribute('data-turn-role') === 'Model') {
                     role = 'assistant';
                 }
 
-                // 提取文本
-                const text = extractCleanText(turn);
-
-                // 只有当提取出有效文本，且该 ID 未被记录过，才保存
-                // 或者：如果之前记录的是无效的/不完整的，可以用新的覆盖
-                if (text) {
-                    if (!collectedMessages.has(turnId)) {
-                        newItemsCount++;
-                    }
-                    collectedMessages.set(turnId, {
-                        role: role,
-                        content: text,
-                        domIndex: Array.from(turn.parentNode.children).indexOf(turn) // 记录 DOM 索引辅助排序
-                    });
+                // 使用新的 Markdown 提取器
+                const content = extractCleanMarkdown(turn);
+                if (content) {
+                    messageMap.set(uid, { role, content });
                 }
             });
 
-            // 计算进度
-            const progress = Math.min(99, Math.round((container.scrollTop / (container.scrollHeight - container.clientHeight)) * 100));
-            updateButtonState(`正在抓取... ${progress}%`);
+            // 滚动逻辑
+            const isBottom = Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) < 20;
+            if (Math.abs(container.scrollTop - lastScrollTop) < 2) stuckCounter++;
+            else stuckCounter = 0;
 
-            // 检查是否到底
-            // 容差 50px
-            if (Math.abs(container.scrollHeight - container.clientHeight - container.scrollTop) < 50) {
-                break;
-            }
+            const percent = Math.min(99, Math.floor((container.scrollTop / (container.scrollHeight - container.clientHeight)) * 100));
+            updateBtn(`分析中... ${percent}%`);
 
-            // 如果连续多次滚动位置没变（可能到底了但高度计算误差），也退出
-            if (container.scrollTop === previousScrollTop) {
-                noProgressCount++;
-                if (noProgressCount > 2) break;
-            } else {
-                noProgressCount = 0;
-            }
+            if (isBottom || stuckCounter >= 3) break;
 
-            previousScrollTop = container.scrollTop;
-
-            // 向下滚动一屏的一定比例
-            container.scrollTop += container.clientHeight * CONFIG.scrollStepPercent;
-
-            // 等待渲染
+            lastScrollTop = container.scrollTop;
+            container.scrollBy({ top: CONFIG.scrollStep, behavior: 'smooth' });
             await sleep(CONFIG.scrollDelay);
         }
 
-        updateButtonState('整理数据...');
-
-        // 3. 整理最终数据
-        // 将 Map 转为 Array
-        let finalMessages = Array.from(collectedMessages.values());
-
-        // 理论上我们从上往下滚，顺序是对的。
-        // 但为了保险，如果能获取到 turn 的 DOM 顺序索引最好，或者依赖 Map 的插入顺序。
-        // 这里不做复杂排序，通常从上往下滚动的 Map 顺序即为正确顺序。
+        // 3. 导出
+        updateBtn('封装JSON...');
+        const validMessages = [];
+        idOrder.forEach(id => {
+            if (messageMap.has(id)) {
+                validMessages.push(messageMap.get(id));
+            }
+        });
 
         const exportData = {
-            system_instruction: getSystemInstruction(),
-            messages: finalMessages.map(m => ({
-                role: m.role,
-                content: m.content
-            }))
+            system_instruction: sysInstruction,
+            messages: validMessages
         };
 
-        // 4. 导出文件
-        downloadJson(exportData);
-
-        updateButtonState('导出 JSON', false);
+        downloadFile(exportData);
+        updateBtn('导出 JSON', false);
         isExporting = false;
     }
 
-    // 下载 JSON
-    function downloadJson(data) {
-        // 生成文件名：使用当前时间或对话标题
-        const titleElement = document.querySelector('.page-title h1');
-        const titleName = titleElement ? titleElement.innerText.replace(/[\/\\?%*:|"<>]/g, '-') : 'aistudio_export';
-        const dateStr = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
-        const fileName = `${titleName}_${dateStr}.json`;
+    function downloadFile(data) {
+        let title = "aistudio_chat";
+        try {
+            const h1 = document.querySelector('.page-title h1');
+            if (h1) title = h1.innerText.trim().replace(/[\\/:*?"<>|]/g, '_');
+        } catch(e) {}
 
-        const jsonStr = JSON.stringify(data, null, 2);
-        const blob = new Blob([jsonStr], { type: 'application/json' });
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type: "application/json"});
         const url = URL.createObjectURL(blob);
-
         const a = document.createElement('a');
         a.href = url;
-        a.download = fileName;
+        a.download = `${title}.json`;
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(url);
     }
 
-    // 初始化监听
     function init() {
-        // 观察 DOM 变化，防止按钮在路由跳转后消失
-        const observer = new MutationObserver(() => {
-            createExportButton();
-        });
+        const observer = new MutationObserver(() => createExportButton());
         observer.observe(document.body, { childList: true, subtree: true });
         createExportButton();
     }
 
     window.addEventListener('load', init);
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        init();
-    }
+    if (document.readyState === 'complete') init();
 
 })();
