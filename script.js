@@ -4,7 +4,7 @@
 // @version      5.0
 // @author       Tokisaki Galaxy
 // @match        https://aistudio.google.com/prompts/*
-// @description  Export AI Studio chat history. 1. i18n support (CN/EN/DE/RU). 2. Draggable button. 3. Auto system prompt detection. 4. Perfect Markdown formatting.
+// @description  Export AI Studio chat history. 1. i18n support (CN/EN/DE/RU/JA). 2. Draggable button. 3. Auto system prompt detection. 4. Perfect Markdown formatting.
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=google.com
 // @grant        none
 // ==/UserScript==
@@ -57,6 +57,17 @@
             noChat: "Область чата не найдена.",
             sysFound: "System prompt получен",
             sysHidden: "Расширение боковой панели..."
+        },
+        'ja': {
+            exportBtn: "JSON をエクスポート",
+            wait: "少々お待ちください...",
+            getSys: "システムプロンプトを取得中...",
+            resetView: "ビューをリセット中...",
+            analyzing: "解析中...",
+            packaging: "JSON を生成中...",
+            noChat: "チャット領域が見つかりませんでした。",
+            sysFound: "システムプロンプトを取得しました",
+            sysHidden: "サイドバーを展開しています..."
         }
     };
 
